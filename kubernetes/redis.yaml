@@ -20,6 +20,7 @@ spec:
         - name: redis
           image: redis
           imagePullPolicy: IfNotPresent
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 6379
           volumeMounts:

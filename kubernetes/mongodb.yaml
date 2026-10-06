@@ -20,6 +20,7 @@ spec:
         - name: mongo
           image: mongo
           imagePullPolicy: IfNotPresent
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 27017
           volumeMounts:
