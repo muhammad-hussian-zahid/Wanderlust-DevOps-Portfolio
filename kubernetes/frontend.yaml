@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: hussain968/frontend-wanderlust:latest
+          image: hussain968/wanderlust-frontend-beta:v1
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5173
