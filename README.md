@@ -1,531 +1,928 @@
-# Wanderlust - Your Ultimate Travel Blog 🌍✈️
+# Wanderlust: Automated DevSecOps CI/CD Pipeline on Kubernetes (kind) in GitHub Codespaces
 
-WanderLust is a simple MERN travel blog website ✈ This project is aimed to help people to contribute in open source, upskill in react and also master git.
+A complete, working DevSecOps pipeline that runs on **one GitHub Codespace** with **no cloud account (no AWS/EKS)**.
 
-![Preview Image](https://github.com/krishnaacharyaa/wanderlust/assets/116620586/17ba9da6-225f-481d-87c0-5d5a010a9538)
-#
+When a developer pushes code and starts the pipeline, everything after that is automatic:
+security scans, code-quality checks, Docker image build, push to Docker Hub, GitOps deployment to Kubernetes through Argo CD, an automated email with the build log, and live monitoring in Grafana.
 
-# Wanderlust Mega Project End to End Implementation
+> **Credit:** This project is based on the open-source [Wanderlust Mega Project](https://github.com/DevMadhup/Wanderlust-Mega-Project) by Madhup Pandey (DevMadhup), which was written for AWS EKS with separate Jenkins master/worker servers. This repository adapts it to run on a single GitHub Codespace using a kind cluster.
 
-### In this demo, we will see how to deploy an end to end three tier MERN stack application on EKS cluster.
-#
-### <mark>Project Deployment Flow:</mark>
-<img src="https://github.com/DevMadhup/Wanderlust-Mega-Project/blob/main/Assets/DevSecOps%2BGitOps.gif" />
+---
 
-#
+## Table of contents
 
-## Tech stack used in this project:
-- GitHub (Code)
-- Docker (Containerization)
-- Jenkins (CI)
-- OWASP (Dependency check)
-- SonarQube (Quality)
-- Trivy (Filesystem Scan)
-- ArgoCD (CD)
-- Redis (Caching)
-- AWS EKS (Kubernetes)
-- Helm (Monitoring using grafana and prometheus)
+1. [What this project does](#1-what-this-project-does)
+2. [Architecture](#2-architecture)
+3. [Tools and tested versions](#3-tools-and-tested-versions)
+4. [Prerequisites](#4-prerequisites)
+5. [Step-by-step deployment](#5-step-by-step-deployment)
+6. [Daily start and stop](#6-daily-start-and-stop-after-the-codespace-restarts)
+7. [Disk space management](#7-disk-space-management)
+8. [Troubleshooting](#8-troubleshooting)
+9. [Known limitations](#9-known-limitations)
+10. [Appendix A to D: files you need](#appendix-a-ci-jenkinsfile-root-jenkinsfile)
 
-### How pipeline will look after deployment:
-- <b>CI pipeline to build and push</b>
-![image](https://github.com/user-attachments/assets/20542d8b-0701-43ed-b2f8-82f8ed28d053)
+---
 
-- <b>CD pipeline to update application version</b>
-![image](https://github.com/user-attachments/assets/8fd13807-622e-45f7-af23-dcc1ba30ca5d)
+## 1. What this project does
 
-- <b>ArgoCD application for deployment on EKS</b>
-![image](https://github.com/user-attachments/assets/1ea9d486-656e-40f1-804d-2651efb54cf6)
+| Stage | Tool | What happens |
+|---|---|---|
+| CI | Jenkins | Pulls code from GitHub |
+| CI | Trivy | Scans the files for vulnerabilities |
+| CI | OWASP Dependency-Check | Checks libraries for known vulnerabilities |
+| CI | SonarQube | Analyses code quality and applies a Quality Gate |
+| CI | Docker | Builds the frontend and backend images |
+| CI | Docker Hub | Stores the images |
+| CD | Jenkins (second job) | Writes the new image tags into `kubernetes/*.yaml` and pushes to GitHub |
+| CD | Argo CD | Detects the Git change and syncs it to the cluster (GitOps) |
+| Run | Kubernetes (kind) | Replaces the old frontend and backend pods with new ones |
+| Notify | Jenkins + Gmail | Emails the build result and log |
+| Monitor | Prometheus + Grafana | Dashboards for cluster and pod health |
 
-#
-> [!Important]
-> Below table helps you to navigate to the particular tool installation section fast.
+The application has four parts: React frontend, Node.js backend, MongoDB and Redis.
 
-| Tech stack    | Installation |
-| -------- | ------- |
-| Jenkins Master | <a href="#Jenkins">Install and configure Jenkins</a>     |
-| eksctl | <a href="#EKS">Install eksctl</a>     |
-| Argocd | <a href="#Argo">Install and configure ArgoCD</a>     |
-| Jenkins-Worker Setup | <a href="#Jenkins-worker">Install and configure Jenkins Worker Node</a>     |
-| OWASP setup | <a href="#Owasp">Install and configure OWASP</a>     |
-| SonarQube | <a href="#Sonar">Install and configure SonarQube</a>     |
-| Email Notification Setup | <a href="#Mail">Email notification setup</a>     |
-| Monitoring | <a href="#Monitor">Prometheus and grafana setup using helm charts</a>
-| Clean Up | <a href="#Clean">Clean up</a>     |
-#
+---
 
-### Pre-requisites to implement this project:
-#
-- Root user access
-```bash
-sudo su
-```
-> [!Note]
-> This project will be implemented on North California region (us-west-1).
+## 2. Architecture
 
-- <b>Create 1 Master machine on AWS with 2CPU, 8GB of RAM (t2.large) and 29 GB of storage and install Docker on it.</b>
-#
-- <b>Open the below ports in security group of master machine and also attach same security group to Jenkins worker node (We will create worker node shortly)</b>
-![image](https://github.com/user-attachments/assets/4e5ecd37-fe2e-4e4b-a6ba-14c7b62715a3)
-
-> [!Note]
-> We are creating this master machine because we will configure Jenkins master, eksctl, EKS cluster creation from here.
-
-Install & Configure Docker by using below command, "NewGrp docker" will refresh the group config hence no need to restart the EC2 machine.
-
-```bash
-apt-get update
-```
-```bash
-apt-get install docker.io -y
-usermod -aG docker ubuntu && newgrp docker
-```
-#
-- <b id="Jenkins">Install and configure Jenkins (Master machine)</b>
-```bash
-sudo apt update -y
-sudo apt install fontconfig openjdk-17-jre -y
-
-sudo wget -O /usr/share/keyrings/jenkins-keyring.asc \
-  https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
-  
-echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc]" \
-  https://pkg.jenkins.io/debian-stable binary/ | sudo tee \
-  /etc/apt/sources.list.d/jenkins.list > /dev/null
-  
-sudo apt-get update -y
-sudo apt-get install jenkins -y
-```
-- <b>Now, access Jenkins Master on the browser on port 8080 and configure it</b>.
-#
-- <b id="EKS">Create EKS Cluster on AWS (Master machine)</b>
-  - IAM user with **access keys and secret access keys**
-  - AWSCLI should be configured (<a href="https://github.com/DevMadhup/DevOps-Tools-Installations/blob/main/AWSCLI/AWSCLI.sh">Setup AWSCLI</a>)
-  ```bash
-  curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-  sudo apt install unzip
-  unzip awscliv2.zip
-  sudo ./aws/install
-  aws configure
-  ```
-
-  - Install **kubectl** (Master machine)(<a href="https://github.com/DevMadhup/DevOps-Tools-Installations/blob/main/Kubectl/Kubectl.sh">Setup kubectl </a>)
-  ```bash
-  curl -o kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.19.6/2021-01-05/bin/linux/amd64/kubectl
-  chmod +x ./kubectl
-  sudo mv ./kubectl /usr/local/bin
-  kubectl version --short --client
-  ```
-
-  - Install **eksctl** (Master machine) (<a href="https://github.com/DevMadhup/DevOps-Tools-Installations/blob/main/eksctl%20/eksctl.sh">Setup eksctl</a>)
-  ```bash
-  curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-  sudo mv /tmp/eksctl /usr/local/bin
-  eksctl version
-  ```
-  
-  - <b>Create EKS Cluster (Master machine)</b>
-  ```bash
-  eksctl create cluster --name=wanderlust \
-                      --region=us-west-1 \
-                      --version=1.30 \
-                      --without-nodegroup
-  ```
-  - <b>Associate IAM OIDC Provider (Master machine)</b>
-  ```bash
-  eksctl utils associate-iam-oidc-provider \
-    --region us-west-1 \
-    --cluster wanderlust \
-    --approve
-  ```
-  - <b>Create Nodegroup (Master machine)</b>
-  ```bash
-  eksctl create nodegroup --cluster=wanderlust \
-                       --region=us-west-1 \
-                       --name=wanderlust \
-                       --node-type=t2.large \
-                       --nodes=2 \
-                       --nodes-min=2 \
-                       --nodes-max=2 \
-                       --node-volume-size=29 \
-                       --ssh-access \
-                       --ssh-public-key=eks-nodegroup-key 
-  ```
-> [!Note]
->  Make sure the ssh-public-key "eks-nodegroup-key is available in your aws account"
-#
-- <b id="Jenkins-worker">Setting up jenkins worker node</b>
-  - Create a new EC2 instance (Jenkins Worker) with 2CPU, 8GB of RAM (t2.large) and 29 GB of storage and install java on it
-  ```bash
-  sudo apt update -y
-  sudo apt install fontconfig openjdk-17-jre -y
-  ```
-  - Create an IAM role with <mark>administrator access</mark> attach it to the jenkins worker node <mark>Select Jenkins worker node EC2 instance --> Actions --> Security --> Modify IAM role</mark>
-  ![image](https://github.com/user-attachments/assets/1a9060db-db11-40b7-86f0-47a65e8ed68b)
-
-  - Configure AWSCLI (<a href="https://github.com/DevMadhup/DevOps-Tools-Installations/blob/main/AWSCLI/AWSCLI.sh">Setup AWSCLI</a>)
-  ```bash
-  sudo su
-  ```
-  ```bash
-  curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-  sudo apt install unzip
-  unzip awscliv2.zip
-  sudo ./aws/install
-  aws configure
-  ```
-#
-  - <b>generate ssh keys (Master machine) to setup jenkins master-slave</b>
-  ```bash
-  ssh-keygen
-  ```
-  ![image](https://github.com/user-attachments/assets/0c8ecb74-1bc5-46f9-ad55-1e22e8092198)
-#
-  - <b>Now move to directory where your ssh keys are generated and copy the content of public key and paste to authorized_keys file of the Jenkins worker node.</b>
-#
-  - <b>Now, go to the jenkins master and navigate to <mark>Manage jenkins --> Nodes</mark>, and click on Add node </b>
-    - <b>name:</b> Node
-    - <b>type:</b> permanent agent
-    - <b>Number of executors:</b> 2
-    - Remote root directory
-    - <b>Labels:</b> Node
-    - <b>Usage:</b> Only build jobs with label expressions matching this node
-    - <b>Launch method:</b> Via ssh
-    - <b>Host:</b> \<public-ip-worker-jenkins\>
-    - <b>Credentials:</b> <mark>Add --> Kind: ssh username with private key --> ID: Worker --> Description: Worker --> Username: root --> Private key: Enter directly --> Add Private key</mark>
-    - <b>Host Key Verification Strategy:</b> Non verifying Verification Strategy
-    - <b>Availability:</b> Keep this agent online as much as possible
-#
-  - And your jenkins worker node is added
-  ![image](https://github.com/user-attachments/assets/cab93696-a4e2-4501-b164-8287d7077eef)
-
-# 
-- <b id="docker">Install docker (Jenkins Worker)</b>
-
-```bash
-apt install docker.io -y
-usermod -aG docker ubuntu && newgrp docker
-```
-#
-- <b id="Sonar">Install and configure SonarQube (Master machine)</b>
-```bash
-docker run -itd --name SonarQube-Server -p 9000:9000 sonarqube:lts-community
-```
-#
-- <b id="Trivy">Install Trivy (Jenkins Worker)</b>
-```bash
-sudo apt-get install wget apt-transport-https gnupg lsb-release -y
-wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
-sudo apt-get update -y
-sudo apt-get install trivy -y
-```
-#
-- <b id="Argo">Install and Configure ArgoCD (Master Machine)</b>
-  - <b>Create argocd namespace</b>
-  ```bash
-  kubectl create namespace argocd
-  ```
-  - <b>Apply argocd manifest</b>
-  ```bash
-  kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-  ```
-  - <b>Make sure all pods are running in argocd namespace</b>
-  ```bash
-  watch kubectl get pods -n argocd
-  ```
-  - <b>Install argocd CLI</b>
-  ```bash
-  curl --silent --location -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/v2.4.7/argocd-linux-amd64
-  ```
-  - <b>Provide executable permission</b>
-  ```bash
-  chmod +x /usr/local/bin/argocd
-  ```
-  - <b>Check argocd services</b>
-  ```bash
-  kubectl get svc -n argocd
-  ```
-  - <b>Change argocd server's service from ClusterIP to NodePort</b>
-  ```bash
-  kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "NodePort"}}'
-  ```
-  - <b>Confirm service is patched or not</b>
-  ```bash
-  kubectl get svc -n argocd
-  ```
-  - <b> Check the port where ArgoCD server is running and expose it on security groups of a worker node</b>
-  ![image](https://github.com/user-attachments/assets/a2932e03-ebc7-42a6-9132-82638152197f)
-  - <b>Access it on browser, click on advance and proceed with</b>
-  ```bash
-  <public-ip-worker>:<port>
-  ```
-  ![image](https://github.com/user-attachments/assets/29d9cdbd-5b7c-44b3-bb9b-1d091d042ce3)
-  ![image](https://github.com/user-attachments/assets/08f4e047-e21c-4241-ba68-f9b719a4a39a)
-  ![image](https://github.com/user-attachments/assets/1ffa85c3-9055-49b4-aab0-0947b95f0dd2)
-  - <b>Fetch the initial password of argocd server</b>
-  ```bash
-  kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo
-  ```
-  - <b>Username: admin</b>
-  - <b> Now, go to <mark>User Info</mark> and update your argocd password
-#
-## Steps to add email notification
-- <b id="Mail">Go to your Jenkins Master EC2 instance and allow 465 port number for SMTPS</b>
-#
-- <b>Now, we need to generate an application password from our gmail account to authenticate with jenkins</b>
-  - <b>Open gmail and go to <mark>Manage your Google Account --> Security</mark></b>
-> [!Important]
-> Make sure 2 step verification must be on
-
-  ![image](https://github.com/user-attachments/assets/5ab9dc9d-dcce-4f9d-9908-01095f1253cb)
-
-  - <b>Search for <mark>App password</mark> and create a app password for jenkins</b>
-  ![image](https://github.com/user-attachments/assets/701752da-7703-4685-8f06-fe1f65dd1b9c)
-  ![image](https://github.com/user-attachments/assets/adc8d8c0-8be4-4319-9042-4115abb5c6fc)
-  
-#
-- <b> Once, app password is create and go back to jenkins <mark>Manage Jenkins --> Credentials</mark> to add username and password for email notification</b>
-![image](https://github.com/user-attachments/assets/2a42ec62-87c8-43c8-a034-7be0beb8824e)
-
-# 
-- <b> Go back to <mark>Manage Jenkins --> System</mark> and search for <mark>Extended E-mail Notification</mark></b>
-![image](https://github.com/user-attachments/assets/bac81e24-bb07-4659-a251-955966feded8)
-#
-- <b>Scroll down and search for <mark>E-mail Notification</mark> and setup email notification</b>
-> [!Important]
-> Enter your gmail password which we copied recently in password field <mark>E-mail Notification --> Advance</mark>
-
-![image](https://github.com/user-attachments/assets/14e254fc-1400-457e-b3f4-046404b66950)
-![image](https://github.com/user-attachments/assets/7be70b3a-b0dc-415c-838a-b1c6fd87c182)
-![image](https://github.com/user-attachments/assets/cffb6e1d-4838-483e-97e0-6851c204ab21)
-
-#
-## Steps to implement the project:
-- <b>Go to Jenkins Master and click on <mark> Manage Jenkins --> Plugins --> Available plugins</mark> install the below plugins:</b>
-  - OWASP
-  - SonarQube Scanner
-  - Docker
-  - Pipeline: Stage View
-#
-- <b id="Owasp">Configure OWASP, move to <mark>Manage Jenkins --> Plugins --> Available plugins</mark> (Jenkins Worker)</b>
-![image](https://github.com/user-attachments/assets/da6a26d3-f742-4ea8-86b7-107b1650a7c2)
-
-- <b id="Sonar">After OWASP plugin is installed, Now move to <mark>Manage jenkins --> Tools</mark> (Jenkins Worker)</b>
-![image](https://github.com/user-attachments/assets/3b8c3f20-202e-4864-b3b6-b48d7a604ee8)
-#
-- <b>Login to SonarQube server and create the credentials for jenkins to integrate with SonarQube</b>
-  - Navigate to <mark>Administration --> Security --> Users --> Token</mark>
-  ![image](https://github.com/user-attachments/assets/86ad8284-5da6-4048-91fe-ac20c8e4514a)
-  ![image](https://github.com/user-attachments/assets/6bc671a5-c122-45c0-b1f0-f29999bbf751)
-  ![image](https://github.com/user-attachments/assets/e748643a-e037-4d4c-a9be-944995979c60)
-
-#
-- <b>Now, go to <mark> Manage Jenkins --> credentials</mark> and add Sonarqube credentials:</b>
-![image](https://github.com/user-attachments/assets/0688e105-2170-4c3f-87a3-128c1a05a0b8)
-#
-- <b>Go to <mark> Manage Jenkins --> Tools</mark> and search for SonarQube Scanner installations:</b>
-![image](https://github.com/user-attachments/assets/2fdc1e56-f78c-43d2-914a-104ec2c8ea86)
-#
-- <b> Go to <mark> Manage Jenkins --> credentials</mark> and add Github credentials to push updated code from the pipeline:</b>
-![image](https://github.com/user-attachments/assets/4d0c1a47-621e-4aa2-a0b1-71927fcdaef4)
-> [!Note]
-> While adding github credentials add Personal Access Token in the password field.
-#
-- <b>Go to <mark> Manage Jenkins --> System</mark> and search for SonarQube installations:</b>
-![image](https://github.com/user-attachments/assets/ae866185-cb2b-4e83-825b-a125ec97243a)
-#
-- <b>Now again, Go to <mark> Manage Jenkins --> System</mark> and search for Global Trusted Pipeline Libraries:</b
-![image](https://github.com/user-attachments/assets/874b2e03-49b9-4c26-9b0f-bd07ce70c0f1)
-![image](https://github.com/user-attachments/assets/1ca83b43-ce85-4970-941d-9a819ce4ecfd)
-#
-- <b>Login to SonarQube server, go to <mark>Administration --> Webhook</mark> and click on create </b>
-![image](https://github.com/user-attachments/assets/16527e72-6691-4fdf-a8d2-83dd27a085cb)
-![image](https://github.com/user-attachments/assets/a8b45948-766a-49a4-b779-91ac3ce0443c)
-#
-- <b>Now, go to github repository and under <mark>Automations</mark> directory update the <mark>instance-id</mark> field on both the <mark>updatefrontendnew.sh updatebackendnew.sh</mark> with the k8s worker's instance id</b>
-![image](https://github.com/user-attachments/assets/3cb044b4-df88-4d68-bf7c-775cf78d5bf2)
-#
-- <b>Navigate to <mark> Manage Jenkins --> credentials</mark> and add credentials for docker login to push docker image:</b>
-![image](https://github.com/user-attachments/assets/1a8287fc-b205-4156-8342-3f660f15e8fa)
-#
-- <b>Create a <mark>Wanderlust-CI</mark> pipeline</b>
-![image](https://github.com/user-attachments/assets/55c7b611-3c20-445f-a49c-7d779894e232)
-
-#
-- <b>Create one more pipeline <mark>Wanderlust-CD</mark></b>
-![image](https://github.com/user-attachments/assets/23f84a93-901b-45e3-b4e8-a12cbed13986)
-![image](https://github.com/user-attachments/assets/ac79f7e6-c02c-4431-bb3b-5c7489a93a63)
-![image](https://github.com/user-attachments/assets/46a5937f-e06e-4265-ac0f-42543576a5cd)
-#
-- <b>Provide permission to docker socket so that docker build and push command do not fail (Jenkins Worker)</b>
-```bash
-chmod 777 /var/run/docker.sock
-```
-![image](https://github.com/user-attachments/assets/e231c62a-7adb-4335-b67e-480758713dbf)
-#
-- <b> Go to Master Machine and add our own eks cluster to argocd for application deployment using cli</b>
-  - <b>Login to argoCD from CLI</b>
-  ```bash
-   argocd login 52.53.156.187:32738 --username admin
-  ```
-> [!Tip]
-> 52.53.156.187:32738 --> This should be your argocd url
-
-  ![image](https://github.com/user-attachments/assets/7d05e5ca-1a16-4054-a321-b99270ca0bf9)
-
-  - <b>Check how many clusters are available in argocd </b>
-  ```bash
-  argocd cluster list
-  ```
-  ![image](https://github.com/user-attachments/assets/76fe7a45-e05c-422d-9652-bdaee02d630f)
-  - <b>Get your cluster name</b>
-  ```bash
-  kubectl config get-contexts
-  ```
-  ![image](https://github.com/user-attachments/assets/4cab99aa-cef3-45f6-9150-05004c2f09f8)
-  - <b>Add your cluster to argocd</b>
-  ```bash
-  argocd cluster add Wanderlust@wanderlust.us-west-1.eksctl.io --name wanderlust-eks-cluster
-  ```
-  > [!Tip]
-  > Wanderlust@wanderlust.us-west-1.eksctl.io --> This should be your EKS Cluster Name.
-
-  ![image](https://github.com/user-attachments/assets/0f36aafd-bab9-4ef8-ba5d-3eb56d850604)
-  - <b> Once your cluster is added to argocd, go to argocd console <mark>Settings --> Clusters</mark> and verify it</b>
-  ![image](https://github.com/user-attachments/assets/4490b632-19fd-4499-a341-fabf8488d13c)
-#
-- <b>Go to <mark>Settings --> Repositories</mark> and click on <mark>Connect repo</mark> </b>
-![image](https://github.com/user-attachments/assets/cc8728e5-546b-4c46-bd4c-538f4cd6a63d)
-![image](https://github.com/user-attachments/assets/eb3646e2-db84-4439-a11a-d4168080d9cc)
-![image](https://github.com/user-attachments/assets/a07f8703-5ef3-4524-aaa7-39a139335eb7)
-> [!Note]
-> Connection should be successful
-
-- <b>Now, go to <mark>Applications</mark> and click on <mark>New App</mark></b>
-
-![image](https://github.com/user-attachments/assets/ec2d7a51-d78f-4947-a90b-258944ad59a2)
-
-> [!Important]
-> Make sure to click on the <mark>Auto-Create Namespace</mark> option while creating argocd application
-
-![image](https://github.com/user-attachments/assets/55dcd3c2-5424-4efb-9bee-1c12bbf7f158)
-![image](https://github.com/user-attachments/assets/3e2468ff-8cb2-4bda-a8cc-0742cd6d0cae)
-
-- <b>Congratulations, your application is deployed on AWS EKS Cluster</b>
-![image](https://github.com/user-attachments/assets/bc2d9680-fe00-49f9-81bf-93c5595c20cc)
-![image](https://github.com/user-attachments/assets/1ea9d486-656e-40f1-804d-2651efb54cf6)
-- <b>Open port 31000 and 31100 on worker node and Access it on browser</b>
-```bash
-<worker-public-ip>:31000
-```
-![image](https://github.com/user-attachments/assets/a4b2a4b4-e1aa-4b22-ac6b-f40003d0723a)
-![image](https://github.com/user-attachments/assets/06f9f1c8-094d-4d9f-a9d8-256fb18a9ae4)
-![image](https://github.com/user-attachments/assets/64394f90-8610-44c0-9f63-c3a21eb78f55)
-- <b>Email Notification</b>
-![image](https://github.com/user-attachments/assets/0ab1ef47-f939-4618-8651-6aa9274721f4)
-
-#
-## How to monitor EKS cluster, kubernetes components and workloads using prometheus and grafana via HELM (On Master machine)
-- <p id="Monitor">Install Helm Chart</p>
-```bash
-curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-```
-```bash
-chmod 700 get_helm.sh
-```
-```bash
-./get_helm.sh
+```mermaid
+flowchart LR
+    Dev["Developer pushes code"] --> GH[("GitHub repository")]
+    subgraph CI["Jenkins job: Wanderlust-CI"]
+        A["Checkout"] --> B["Trivy scan"] --> C["OWASP Dependency-Check"] --> D["SonarQube analysis"] --> E["Quality Gate"] --> F["Docker build"] --> G["Push to Docker Hub"]
+    end
+    GH --> A
+    G --> H["Jenkins job: Wanderlust-CD"]
+    H -->|"updates image tags in kubernetes yaml files and pushes"| GH
+    GH -->|"Argo CD detects the change"| I["Argo CD"]
+    I --> K["kind cluster: frontend, backend, MongoDB, Redis"]
+    K --> M["Prometheus and Grafana"]
+    H -.->|"build result and log"| Mail["Gmail"]
 ```
 
-#
--  Add Helm Stable Charts for Your Local Client
+Everything runs inside one Codespace:
+
+| Component | How it runs | Port |
+|---|---|---|
+| Jenkins | Linux service (installed with apt) | 8080 |
+| SonarQube | Docker container | 9000 |
+| kind cluster | Docker container `wanderlust-control-plane` | n/a |
+| Argo CD UI | `kubectl port-forward` | 8443 |
+| Frontend | `kubectl port-forward` to the Kubernetes service | 31000 |
+| Backend | `kubectl port-forward` to the Kubernetes service | 31100 |
+| Grafana / Prometheus (optional) | `kubectl port-forward` | 3001 / 9091 |
+
+---
+
+## 3. Tools and tested versions
+
+| Tool | Version used |
+|---|---|
+| GitHub Codespaces | 4-core, 16 GB RAM, 32 GB disk, Ubuntu 24.04 |
+| Jenkins | LTS, installed from the official apt repository, Java 21 |
+| SonarQube | 9.9.8 (`sonarqube:lts-community`) |
+| Trivy | 0.74.0 |
+| OWASP Dependency-Check | 13.0.0 (installed automatically by the Jenkins plugin) |
+| Kubernetes (kind node image) | v1.37.0 |
+| Argo CD | v3.5.4 (from the `stable` manifests) |
+| kube-prometheus-stack (Helm chart) | 92.3.0 |
+| Application runtime | Node.js 21 (see the Dockerfiles) |
+
+Newer versions will probably work, but these are the ones this guide was tested with.
+
+---
+
+## 4. Prerequisites
+
+### Accounts
+
+| Account | Why you need it |
+|---|---|
+| GitHub | Repositories, Codespaces, token for Jenkins |
+| Docker Hub | Stores the built images. Create an **access token** (Account Settings, Security, New Access Token, permission Read and Write) |
+| Gmail | Sends build emails. Turn on 2-Step Verification, then create an **App password** at https://myaccount.google.com/apppasswords |
+| NVD API key (free) | Lets OWASP Dependency-Check download its vulnerability database. Request one at https://nvd.nist.gov/developers/request-an-api-key and confirm it from the email |
+
+### Machine size (important)
+
+| Resource | Needed | Why |
+|---|---|---|
+| Codespace type | **4-core, 16 GB RAM** | On the 2-core (8 GB) machine only about 1.8 GB of RAM was free once the cluster, Argo CD, SonarQube and Jenkins were running |
+| Disk | 32 GB (fixed for 2-core and 4-core) | The disk is the tightest resource. See [Disk space management](#7-disk-space-management) |
+
+GitHub's free plan includes 120 core-hours per month (check your own numbers at https://github.com/settings/billing). A 4-core Codespace uses 4 core-hours per hour, so that is about 30 hours of runtime. **Stop the Codespace when you are not using it.**
+
+Plan for roughly 6 hours for a first complete setup.
+
+### Placeholders used in this guide
+
+Replace these every time you see them:
+
+| Placeholder | Replace with |
+|---|---|
+| `YOUR_GITHUB_USERNAME` | Your GitHub username |
+| `YOUR_DOCKERHUB_USERNAME` | Your Docker Hub username (lowercase) |
+| `YOUR_GITHUB_EMAIL` | The email on your GitHub account |
+| `YOUR_EMAIL` | Your Gmail address (sender and receiver of build emails) |
+
+---
+
+## 5. Step-by-step deployment
+
+Run all commands in the **Codespace terminal** unless a step says otherwise.
+
+### Step 1: Fork the repositories and create the Codespace
+
+1. Fork the project: https://github.com/DevMadhup/Wanderlust-Mega-Project
+2. Fork the Jenkins Shared Library: https://github.com/muhammad-hussian-zahid/Jenkins_SharedLib
+   (The Jenkinsfiles call steps such as `code_checkout`, `trivy_scan`, `owasp_dependency`, `sonarqube_analysis`, `sonarqube_code_quality`, `docker_build` and `docker_push`. They are defined in this library.)
+3. Open **your fork** of the project on GitHub, click **Code**, then **Codespaces**, then the **...** menu, then **New with options**. Choose machine type **4-core** and click **Create codespace**.
+4. When the terminal opens, check the machine:
+
 ```bash
-helm repo add stable https://charts.helm.sh/stable
+nproc
+free -h
+df -h /workspaces
 ```
 
-#
-- Add Prometheus Helm Repository
+Expected: `4`, about 15 GiB total memory, and a 32 GB disk.
+
+### Step 2: Check the tools that Codespaces provides
+
+```bash
+docker --version
+kubectl version --client
+gh --version
+helm version || curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+```
+
+The last line installs Helm only if it is missing.
+
+### Step 3: Configure the project for your own accounts
+
+Work inside your fork:
+
+```bash
+cd /workspaces/Wanderlust-Mega-Project
+```
+
+**3.1 Set the application URLs.** The frontend is built with the backend URL inside it, so these must be correct **before** the images are built:
+
+```bash
+FRONTEND_URL="https://${CODESPACE_NAME}-31000.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}"
+BACKEND_URL="https://${CODESPACE_NAME}-31100.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}"
+echo "$FRONTEND_URL"
+echo "$BACKEND_URL"
+```
+
+**3.2 Write the URLs and a new secret into the env files:**
+
+```bash
+sed -i "s|^VITE_API_PATH=.*|VITE_API_PATH=\"$BACKEND_URL\"|" frontend/.env.docker
+sed -i "s|^FRONTEND_URL=.*|FRONTEND_URL=\"$FRONTEND_URL\"|" backend/.env.docker
+sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -hex 64)|" backend/.env.docker
+```
+
+Check the result (leave `MONGODB_URI` and `REDIS_URL` unchanged):
+
+```bash
+cat frontend/.env.docker
+cat backend/.env.docker
+```
+
+> Your fork is public, so this `JWT_SECRET` will be public. Use a throw-away secret for this demo, never one you use elsewhere.
+
+**3.3 Point the Kubernetes manifests to your own images:**
+
+```bash
+sed -i "s|image: .*|image: YOUR_DOCKERHUB_USERNAME/wanderlust-backend-beta:v1|"  kubernetes/backend.yaml
+sed -i "s|image: .*|image: YOUR_DOCKERHUB_USERNAME/wanderlust-frontend-beta:v1|" kubernetes/frontend.yaml
+grep -n "image" kubernetes/backend.yaml kubernetes/frontend.yaml
+```
+
+Expected: one `image:` line in each file with your username, and `imagePullPolicy: IfNotPresent` below it.
+
+The image names `wanderlust-backend-beta` and `wanderlust-frontend-beta` must match the names in both Jenkinsfiles. The CD job finds the image line by this name and only replaces the tag after it.
+
+**3.4 Replace the two Jenkinsfiles** with the versions in this README:
+
+- Replace the content of `Jenkinsfile` with [Appendix A](#appendix-a-ci-jenkinsfile-root-jenkinsfile).
+- Replace the content of `GitOps/Jenkinsfile` with [Appendix B](#appendix-b-cd-jenkinsfile-gitopsjenkinsfile).
+
+Replace every placeholder inside them. The original versions call AWS scripts (`Automations/*.sh`) and a Jenkins node labelled `Node`, which do not exist here. The `Automations/` folder is not used in this setup.
+
+**3.5 Commit and push** (Jenkins reads everything from GitHub, so unpushed changes are not used):
+
+```bash
+git add backend/.env.docker frontend/.env.docker kubernetes/backend.yaml kubernetes/frontend.yaml Jenkinsfile GitOps/Jenkinsfile
+git commit -m "Configure for Codespaces"
+git push origin main
+```
+
+### Step 4: Create the Kubernetes cluster (kind)
+
+```bash
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+chmod +x ./kind
+sudo mv ./kind /usr/local/bin/kind
+
+kind create cluster --name wanderlust
+kubectl get nodes
+```
+
+Expected: one node with status `Ready`. The Docker container is named `wanderlust-control-plane`.
+
+> Do **not** use `kubernetes/kind-config.yaml`. It publishes ports 31000 and 31100 on the host, which clashes with the `kubectl port-forward` used in this guide. This guide reaches the app through port-forwarding instead.
+
+The cluster downloads the application images from Docker Hub, so your Docker Hub repositories must be **public** (Step 11).
+
+### Step 5: Install Argo CD
+
+```bash
+kubectl create namespace argocd
+kubectl apply -n argocd --server-side --force-conflicts -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl get pods -n argocd -w
+```
+
+Wait until all pods are `Running` (about 2 to 4 minutes), then press `Ctrl+C`.
+
+Install the Argo CD command-line tool:
+
+```bash
+curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+rm argocd-linux-amd64
+argocd version --client
+```
+
+Open the Argo CD API and log in:
+
+```bash
+nohup kubectl port-forward --address 0.0.0.0 -n argocd svc/argocd-server 8443:443 > /tmp/pf-argocd.log 2>&1 &
+sleep 3
+ARGO_PASSWORD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+echo "$ARGO_PASSWORD"
+argocd login localhost:8443 --insecure --username admin --password "$ARGO_PASSWORD"
+```
+
+The UI is on port **8443**. Open the **Ports** tab in VS Code and click the globe icon next to 8443. The UI uses HTTPS, so if the page does not load, right-click the port, choose **Change Port Protocol**, then **HTTPS**. Log in with `admin` and the password printed above. Keep this port **Private**.
+
+### Step 6: Install Jenkins and Trivy
+
+**6.1 Install Jenkins** from the official repository. The repository signing key was replaced in 2026, so use the `2026` key. Older guides that use the `2023` key fail with a "not signed" error.
+
+```bash
+sudo apt-get update
+sudo apt-get install -y fontconfig openjdk-21-jre wget gnupg apt-transport-https
+
+sudo mkdir -p /etc/apt/keyrings
+sudo wget -O /etc/apt/keyrings/jenkins-keyring.asc https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key
+echo "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/" | sudo tee /etc/apt/sources.list.d/jenkins.list > /dev/null
+
+sudo apt-get update
+sudo apt-get install -y jenkins
+```
+
+Start it and check:
+
+```bash
+sudo service jenkins start
+sudo service jenkins status
+```
+
+**6.2 Let Jenkins use Docker.** Jenkins runs as the user `jenkins`, which must be allowed to use the Docker socket:
+
+```bash
+sudo usermod -aG docker jenkins
+sudo service jenkins restart
+sudo su -s /bin/bash jenkins -c 'docker ps'
+```
+
+Expected: the last command lists your running containers. If it says `permission denied`, run `sudo chmod 666 /var/run/docker.sock` and test again (this setting is lost whenever the Codespace restarts).
+
+> Do not use `sudo -u jenkins ...`. It asks for a password that does not exist. Use `sudo su -s /bin/bash jenkins -c '...'` as shown above.
+
+**6.3 Install Trivy** (the Jenkins pipeline calls it from the machine):
+
+```bash
+sudo apt-get install -y wget apt-transport-https gnupg
+wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+sudo apt-get update
+sudo apt-get install -y trivy
+trivy --version
+```
+
+### Step 7: Start SonarQube
+
+```bash
+docker run -d --name SonarQube-Server --restart unless-stopped -p 9000:9000 \
+  -e SONAR_SEARCH_JAVAADDITIONALOPTS="-Dnode.store.allow_mmap=false" \
+  -e SONAR_WEB_JAVAOPTS="-Xmx512m" \
+  -e SONAR_CE_JAVAOPTS="-Xmx512m" \
+  -e SONAR_SEARCH_JAVAOPTS="-Xmx512m" \
+  sonarqube:lts-community
+```
+
+What the extra options do: `allow_mmap=false` avoids a kernel setting that cannot be changed in a Codespace, and the `-Xmx512m` options keep SonarQube from using several GB of RAM.
+
+Wait 2 to 3 minutes, then check:
+
+```bash
+curl -s localhost:9000/api/system/status
+```
+
+Expected: `"status":"UP"`. While it says `STARTING`, wait longer.
+
+> This container has no volume. Its data (projects, tokens) lives inside the container. **Never delete or recreate `SonarQube-Server`**, or you lose them.
+
+### Step 8: Open Jenkins and SonarQube
+
+Open the **Ports** tab in VS Code. Ports **8080** (Jenkins) and **9000** (SonarQube) should be listed. If one is missing, click **Add Port** and add it. Keep both **Private**. Click the globe icon next to each port to open it.
+
+**SonarQube:** log in with `admin` / `admin` and set a new password when asked. Then go to **My Account, Security, Generate Tokens**, name the token `jenkins`, click **Generate**, and copy the token. You will need it in Step 9.
+
+### Step 9: Configure Jenkins
+
+**9.1 Unlock Jenkins.** In the terminal:
+
+```bash
+sudo cat /var/lib/jenkins/secrets/initialAdminPassword
+```
+
+Paste the password into the Jenkins page, choose **Install suggested plugins**, and create your admin user. Accept the default Jenkins URL.
+
+**9.2 Install plugins.** Go to **Manage Jenkins, Plugins, Available plugins**, and install:
+
+- SonarQube Scanner
+- Docker Pipeline
+- Pipeline Stage View
+- Email Extension
+- OWASP Dependency-Check
+
+Restart Jenkins if it asks.
+
+**9.3 Add credentials.** Go to **Manage Jenkins, Credentials, System, Global credentials (unrestricted), Add Credentials**:
+
+| ID | Kind | Values |
+|---|---|---|
+| `Github-cred` | Username with password | Username: your GitHub username. Password: a GitHub **personal access token (classic)** with the `repo` scope |
+| Docker Hub credential | Username with password | Username: your Docker Hub username. Password: your Docker Hub **access token** |
+| `sonar-token` | Secret text | The SonarQube token from Step 8 |
+| `nvd-api-key` | Secret text | Your NVD API key |
+
+The ID of the Docker Hub credential must match the one used inside the shared library. Open `vars/docker_push.groovy` in your `Jenkins_SharedLib` fork, look for `credentialsId`, and use exactly that ID.
+
+The ID `Github-cred` is case-sensitive and must match `Github-cred` in the CD Jenkinsfile.
+
+**9.4 Configure tools.** Go to **Manage Jenkins, Tools**:
+
+| Section | Name (exact) | Setting |
+|---|---|---|
+| SonarQube Scanner installations | `Sonar` | Install automatically (latest version) |
+| Dependency-Check installations | `OWASP` | Install automatically (from github.com) |
+
+**9.5 Connect Jenkins to SonarQube.** Go to **Manage Jenkins, System**, find **SonarQube servers**, and click **Add SonarQube**:
+
+| Field | Value |
+|---|---|
+| Name | `Sonar` |
+| Server URL | `http://localhost:9000` |
+| Server authentication token | Select `sonar-token` |
+
+Click **Save**. If the token field stays on `- none -`, the pipeline fails later with `Not authorized` (401).
+
+**9.6 Add the shared library.** On the same **Manage Jenkins, System** page, find **Global Trusted Pipeline Libraries** and click **Add**:
+
+| Field | Value |
+|---|---|
+| Name | `Shared` (exactly this, the Jenkinsfiles use `@Library('Shared')`) |
+| Default version | `main` |
+| Retrieval method | Modern SCM, then Git |
+| Project repository | `https://github.com/YOUR_GITHUB_USERNAME/Jenkins_SharedLib.git` |
+
+In your library fork, the OWASP step must pass the NVD key. Edit `vars/owasp_dependency.groovy` to match [Appendix C](#appendix-c-shared-library-file-varsowasp_dependencygroovy), then commit and push to the `main` branch of the library.
+
+**9.7 Configure email.** On **Manage Jenkins, System**:
+
+1. **Jenkins Location:** set **Jenkins URL** to your Codespace address so links in the emails work. Print it with:
+
+   ```bash
+   echo "https://${CODESPACE_NAME}-8080.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}/"
+   ```
+
+   Set **System Admin e-mail address** to your Gmail address.
+
+2. **Extended E-mail Notification:**
+
+   | Field | Value |
+   |---|---|
+   | SMTP server | `smtp.gmail.com` |
+   | SMTP Port | `465` |
+   | Use SSL | Checked |
+   | Credentials | Add a **Username with password** credential: your Gmail address and the Google **App password** |
+
+3. Use **Test configuration by sending test e-mail** to confirm it works. Click **Save**.
+
+### Step 10: Create the two Jenkins jobs
+
+**10.1 CI job.** **New Item**, name `Wanderlust-CI`, type **Pipeline**, **OK**. Then:
+
+- Tick **This project is parameterized** and add two **String Parameter** entries named exactly `FRONTEND_DOCKER_TAG` and `BACKEND_DOCKER_TAG`. (Without this, the **Build with Parameters** button does not appear before the first run.)
+- Under **Pipeline**: Definition **Pipeline script from SCM**, SCM **Git**, Repository URL `https://github.com/YOUR_GITHUB_USERNAME/Wanderlust-Mega-Project.git`, Branch `*/main`, Script Path `Jenkinsfile`.
+- **Save**.
+
+**10.2 CD job.** **New Item**, name **exactly** `Wanderlust-CD`, type **Pipeline**. The CI pipeline starts it by this name. Add the same two string parameters. Under **Pipeline**: the same repository and branch, but Script Path `GitOps/Jenkinsfile`. **Save**.
+
+### Step 11: Run the CI pipeline for the first time
+
+1. Open **Wanderlust-CI** and click **Build with Parameters**.
+2. Enter `v1` for both `FRONTEND_DOCKER_TAG` and `BACKEND_DOCKER_TAG`, then click **Build**.
+3. Open the build and watch **Console Output**, or use **Stage View**.
+
+Stages, in order: Workspace cleanup, Git checkout, Trivy scan, OWASP Dependency-Check, SonarQube analysis, SonarQube Quality Gate, Docker build, Docker push.
+
+Timing: the **first** OWASP run downloads the whole vulnerability database and can take **10 to 30 minutes**. Later runs reuse it and take about 3 to 4 minutes.
+
+When CI succeeds it starts **Wanderlust-CD** automatically. On this first run, CD finds the tags already set to `v1` and prints `Nothing to commit`. That is correct.
+
+**After the push, make your images public.** Open https://hub.docker.com, then your repositories `wanderlust-backend-beta` and `wanderlust-frontend-beta`, and confirm each shows **Public** (Settings, Visibility). The cluster cannot pull private images.
+
+You should also receive the build email in Gmail.
+
+### Step 12: Deploy the application with Argo CD
+
+Create the Argo CD application. It watches the `kubernetes` folder of your fork and deploys it to the namespace `wanderlust` in this cluster:
+
+```bash
+argocd app create wanderlust \
+  --repo https://github.com/YOUR_GITHUB_USERNAME/Wanderlust-Mega-Project.git \
+  --revision main \
+  --path kubernetes \
+  --dest-server https://kubernetes.default.svc \
+  --dest-namespace wanderlust \
+  --directory-exclude 'kind-config.yaml' \
+  --sync-policy automated \
+  --auto-prune \
+  --sync-option CreateNamespace=true
+```
+
+Notes:
+
+- `https://kubernetes.default.svc` is the cluster Argo CD itself runs in. It is already registered, so you do **not** run `argocd cluster add`.
+- `--directory-exclude 'kind-config.yaml'` is required. That file is a kind setup file, not a Kubernetes resource, and without the exclude the whole sync fails.
+
+Check the result:
+
+```bash
+argocd app get wanderlust
+kubectl get pods -n wanderlust
+```
+
+Expected: status `Synced` and `Healthy`, with four pods `Running` (backend, frontend, mongo, redis). If the status is `OutOfSync` or `Missing`, wait a minute, then run `argocd app sync wanderlust`.
+
+**Expose the application.** Create the port-forward script from [Appendix D](#appendix-d-port-forward-script-pfsh) and start it. First stop the manual Argo CD port-forward from Step 5, because the script starts its own:
+
+```bash
+pkill -f "kubectl port-forward"
+chmod +x ~/pf.sh
+nohup ~/pf.sh > /tmp/pf.log 2>&1 &
+sleep 5
+curl -sI localhost:31000 | head -1
+curl -s localhost:31100/ | head -c 100; echo
+```
+
+**Make the application ports public.** The browser calls the backend directly, so both ports must be public. In the **Ports** tab, right-click **31000**, choose **Port Visibility, Public**, and do the same for **31100**. (Alternatively: `gh codespace ports visibility 31000:public 31100:public -c $CODESPACE_NAME`, once both ports are listed.) Keep 8080, 9000 and 8443 **Private**.
+
+Open the application:
+
+```bash
+echo "$FRONTEND_URL"
+```
+
+If the variable is empty (new terminal), print it again with:
+`echo "https://${CODESPACE_NAME}-31000.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}"`
+
+### Step 13: Add monitoring with Prometheus and Grafana (optional)
+
+This is the heaviest optional part. Check that you have **at least 4 GB free** first (`df -h /workspaces`).
+
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+helm install kps prometheus-community/kube-prometheus-stack \
+  -n monitoring --create-namespace \
+  --set alertmanager.enabled=false \
+  --set kubeEtcd.enabled=false \
+  --set kubeScheduler.enabled=false \
+  --set kubeControllerManager.enabled=false \
+  --set kubeProxy.enabled=false \
+  --set prometheus.prometheusSpec.retention=2d \
+  --set prometheus.prometheusSpec.resources.requests.memory=400Mi \
+  --set grafana.adminPassword='CHOOSE_A_PASSWORD'
+
+kubectl get pods -n monitoring -w
 ```
 
-#
-- Create Prometheus Namespace
-```bash
-kubectl create namespace prometheus
-```
-```bash
-kubectl get ns
-```
+Why these options: kind does not expose etcd, scheduler, controller-manager or kube-proxy metrics (they would show as permanently down), and the small retention and memory request keep disk and RAM use low. With no storage configured, Prometheus data is lost if its pod restarts, which is fine for a demo.
 
-#
-- Install Prometheus using Helm
-```bash
-helm install stable prometheus-community/kube-prometheus-stack -n prometheus
-```
-
-#
-- Verify prometheus installation
-```bash
-kubectl get pods -n prometheus
-```
-
-#
-- Check the services file (svc) of the Prometheus
-```bash
-kubectl get svc -n prometheus
-```
-
-#
-- Expose Prometheus and Grafana to the external world through Node Port
-> [!Important]
-> change it from Cluster IP to NodePort after changing make sure you save the file and open the assigned nodeport to the service.
+When all pods are `Running`, press `Ctrl+C` and open the dashboards:
 
 ```bash
-kubectl edit svc stable-kube-prometheus-sta-prometheus -n prometheus
+nohup kubectl port-forward svc/kps-grafana -n monitoring 3001:80 > /tmp/pf-grafana.log 2>&1 &
+nohup kubectl port-forward svc/kps-kube-prometheus-stack-prometheus -n monitoring 9091:9090 > /tmp/pf-prom.log 2>&1 &
 ```
-![image](https://github.com/user-attachments/assets/90f5dc11-23de-457d-bbcb-944da350152e)
-![image](https://github.com/user-attachments/assets/ed94f40f-c1f9-4f50-a340-a68594856cc7)
 
-#
-- Verify service
+Open ports **3001** (Grafana) and **9091** (Prometheus) from the **Ports** tab (keep them Private). Log in to Grafana with user `admin` and the password you chose. Useful dashboards:
+
+- Kubernetes / Compute Resources / Namespace (Pods): choose namespace `wanderlust`
+- Kubernetes / Compute Resources / Pod
+- Node Exporter / Nodes
+
+To remove the monitoring stack later: `helm uninstall kps -n monitoring && kubectl delete namespace monitoring`.
+
+### Step 14: Test the full automation
+
+1. Make a small change in the frontend or backend source, then commit and push it to `main`.
+2. In Jenkins, open **Wanderlust-CI**, click **Build with Parameters**, and enter a **new tag** for both fields, for example `v2`. Use a new tag every time: if the tag does not change, nothing is rolled out.
+3. Wait for CI to succeed. It starts **Wanderlust-CD**, which commits `Updated image tags` to your repository.
+4. In the Argo CD UI, click **Refresh** on the `wanderlust` application. Without a click, Argo CD checks Git about every 3 minutes.
+5. Watch the cluster replace the pods:
+
+   ```bash
+   kubectl get pods -n wanderlust -w
+   ```
+
+   You will see new pods in `ContainerCreating` and old pods in `Terminating`.
+6. Confirm the new tag is running:
+
+   ```bash
+   kubectl get deploy -n wanderlust -o wide | grep -E "backend|frontend"
+   ```
+
+7. Wait about 20 seconds (the port-forward script reconnects to the new pods) and refresh the application page.
+8. Check Gmail for the build result email with the build log attached.
+
+Jenkins does not start automatically when you push, because a Codespace cannot receive GitHub webhooks. You start CI manually. Everything after that is automatic.
+
+---
+
+## 6. Daily start and stop (after the Codespace restarts)
+
+When a Codespace stops, all Docker containers and background processes stop. Your data is kept. To bring everything back:
+
 ```bash
-kubectl get svc -n prometheus
+docker start wanderlust-control-plane SonarQube-Server
+sleep 30
+kind export kubeconfig --name wanderlust
+kubectl get pods -A
+
+sudo service jenkins start
+nohup ~/pf.sh > /tmp/pf.log 2>&1 &
 ```
 
-#
-- Now,let’s change the SVC file of the Grafana and expose it to the outer world
+Then:
+
+1. Wait 2 to 3 minutes for SonarQube (`curl -s localhost:9000/api/system/status` shows `UP`).
+2. In the **Ports** tab, check that 31000 and 31100 are **Public** again (they can reset to Private).
+3. If you use monitoring, start its two port-forwards again (Step 13).
+4. If `docker ps` fails inside Jenkins builds, run the Docker permission fix from Step 6.2.
+
+**Stop the Codespace when you finish**, to save hours. Closing the browser tab does not stop it:
+
 ```bash
-kubectl edit svc stable-grafana -n prometheus
+gh codespace stop -c $CODESPACE_NAME
 ```
-![image](https://github.com/user-attachments/assets/4a2afc1f-deba-48da-831e-49a63e1a8fb6)
 
-#
-- Check grafana service
+---
+
+## 7. Disk space management
+
+The 32 GB disk is the biggest risk. A full disk stops Jenkins with `No space left on device`.
+
+Check often:
+
 ```bash
-kubectl get svc -n prometheus
+df -h /workspaces
 ```
 
-#
-- Get a password for grafana
+Free space safely **after** the Docker push stage has finished:
+
 ```bash
-kubectl get secret --namespace prometheus stable-grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
+docker builder prune -af
+docker exec wanderlust-control-plane crictl rmi --prune
+sudo apt-get clean
 ```
-> [!Note]
-> Username: admin
 
-#
-- Now, view the Dashboard in Grafana
-![image](https://github.com/user-attachments/assets/d2e7ff2f-059d-48c4-92bb-9711943819c4)
-![image](https://github.com/user-attachments/assets/3d6652d0-7795-4fe9-8919-f33eac88db73)
-![image](https://github.com/user-attachments/assets/13321ee5-5d7b-4976-b409-25d3b865a42a)
-![image](https://github.com/user-attachments/assets/75a22e4b-ae81-4cad-9c92-21dd90d126a8)
+Rules:
 
-#
-## Clean Up
-- <b id="Clean">Delete eks cluster</b>
+- Keep at least **5 to 6 GB free** before starting a CI run (the build uses about 3 to 4 GB temporarily).
+- **Never** run `docker image prune -a` between a build and its push. It deletes the freshly built images and the push fails. Run it only when no build is running.
+- **Never** run `docker volume prune` or `docker system prune --volumes`, and never delete the `SonarQube-Server` container.
+- Do not delete the Dependency-Check data under `/var/lib/jenkins`. It holds the downloaded vulnerability database, and downloading it again takes 10 to 30 minutes.
+- Remove the monitoring stack (Step 13) if you need space. It is the largest optional item inside the cluster.
+
+---
+
+## 8. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Build with Parameters` is missing on the job page | Jenkins does not know the parameters before the first run | Add the two String Parameters in the job configuration (Step 10) |
+| `No such library 'Shared'` | Library not configured, or name differs | Configure it exactly as in Step 9.6 |
+| `Not authorized. Analyzing this project requires authentication` (SonarQube, 401) | The token is not attached to the Sonar server entry | **Manage Jenkins, System, SonarQube servers**: select `sonar-token`, then **Save** |
+| OWASP stage fails with `Invalid API Key, length of 0` | The NVD key is not passed | Credential `nvd-api-key` must exist and the library file must match Appendix C |
+| `permission denied ... /var/run/docker.sock` | The `jenkins` user is not in the `docker` group | Step 6.2, then restart Jenkins |
+| `invalid tag "YOUR_DOCKERHUB_USERNAME/...": repository name must be lowercase` | A placeholder was left in the Jenkinsfile, or Jenkins reads an old copy | Replace it, commit and push. Check the job's Script Path and branch |
+| `[sudo] password for codespace` after `sudo -u jenkins ...` | `sudo -u` needs a password that does not exist | Use `sudo su -s /bin/bash jenkins -c '...'` |
+| `No space left on device` | Disk full | Section 7. Then restart Jenkins and run the build again |
+| `denied` or `unauthorized` in the Docker push stage | Wrong Docker Hub credential ID or token | Use the ID found in `vars/docker_push.groovy`, and a token with Read and Write permission |
+| Argo CD sync fails with `kind.x-k8s.io/Cluster` or "could not find the requested resource" | `kind-config.yaml` is being applied as a resource | `argocd app set wanderlust --directory-exclude 'kind-config.yaml'` then `argocd app sync wanderlust` |
+| Pods show `ImagePullBackOff` | The image tag was never pushed, or the Docker Hub repository is private | Confirm the tag exists on Docker Hub and the repository is public |
+| App page shows `HTTP ERROR 502` or "This page isn't working" | The port-forward died (pods were replaced) | Restart the script: `pkill -f "kubectl port-forward"` then `nohup ~/pf.sh > /tmp/pf.log 2>&1 &` |
+| Argo CD UI stops opening | Its port-forward was stopped (for example by the `pkill` above) | Start `~/pf.sh` again, it includes Argo CD on 8443. Restart the Grafana/Prometheus forwards too |
+| Page loads but shows errors or no data | Port 31100 is private, or the URLs in the env files do not match this Codespace | Make 31100 public. Compare the URLs in `.env.docker` with your `$CODESPACE_NAME`, then rebuild |
+| `kubectl` cannot connect after a restart | Cluster container stopped | `docker start wanderlust-control-plane`, wait 30 seconds, `kind export kubeconfig --name wanderlust` |
+| Backend pod in `CrashLoopBackOff` right after deploy | Backend started before MongoDB was ready | `kubectl delete pod -l app=backend -n wanderlust` (a new pod is created automatically) |
+| `git push` returns `403` to a repository other than the Codespace's own | The built-in Codespace login covers only its own repository | Push using a personal access token: `git push https://YOUR_GITHUB_USERNAME:TOKEN@github.com/YOUR_GITHUB_USERNAME/REPO.git main` (never paste a real token into shared logs) |
+| Gmail email fails to send | Normal Gmail password used | Use a Google **App password** (needs 2-Step Verification) |
+| Links inside the build email do not open | The Jenkins URL is still `localhost` | Set the Jenkins URL as in Step 9.7 |
+
+---
+
+## 9. Known limitations
+
+- **The Codespace name is part of the URLs.** If you create a **new** Codespace, redo Step 3.1 and 3.2 (URLs), rebuild the images and push again.
+- **No automatic trigger on `git push`.** GitHub webhooks cannot reach a Codespace, so CI is started manually.
+- **Port-forwarding, not a load balancer.** The app and Argo CD are reached through `kubectl port-forward`, which stops when the Codespace stops. The script reconnects after pod replacements.
+- **Prometheus data is not persistent.** It is lost if the Prometheus pod restarts.
+- **Secrets in a public fork.** `backend/.env.docker` is committed, so use a throw-away `JWT_SECRET`.
+- **This is a learning and demo environment**, not a production cluster.
+
+---
+
+## Appendix A: CI Jenkinsfile (root `Jenkinsfile`)
+
+Replace `YOUR_GITHUB_USERNAME` and `YOUR_DOCKERHUB_USERNAME`:
+
+```groovy
+@Library('Shared') _
+pipeline {
+    agent any
+
+    environment{
+        SONAR_HOME = tool "Sonar"
+    }
+
+    parameters {
+        string(name: 'FRONTEND_DOCKER_TAG', defaultValue: '', description: 'Setting docker image for latest push')
+        string(name: 'BACKEND_DOCKER_TAG', defaultValue: '', description: 'Setting docker image for latest push')
+    }
+
+    stages {
+
+        stage("Workspace cleanup"){
+            steps{
+                script{
+                    cleanWs()
+                }
+            }
+        }
+
+        stage('Git: Code Checkout') {
+            steps {
+                script{
+                    code_checkout("https://github.com/YOUR_GITHUB_USERNAME/Wanderlust-Mega-Project.git","main")
+                }
+            }
+        }
+
+        stage("Trivy: Filesystem scan"){
+            steps{
+                script{
+                    trivy_scan()
+                }
+            }
+        }
+
+        stage("OWASP: Dependency check"){
+            steps{
+                script{
+                    owasp_dependency()
+                }
+            }
+        }
+
+        stage("SonarQube: Code Analysis"){
+            steps{
+                script{
+                    sonarqube_analysis("Sonar","wanderlust","wanderlust")
+                }
+            }
+        }
+
+        stage("SonarQube: Code Quality Gates"){
+            steps{
+                script{
+                    sonarqube_code_quality()
+                }
+            }
+        }
+
+        stage("Docker: Build Images"){
+            steps{
+                script{
+                    dir('backend'){
+                        docker_build("wanderlust-backend-beta","${params.BACKEND_DOCKER_TAG}","YOUR_DOCKERHUB_USERNAME")
+                    }
+
+                    dir('frontend'){
+                        docker_build("wanderlust-frontend-beta","${params.FRONTEND_DOCKER_TAG}","YOUR_DOCKERHUB_USERNAME")
+                    }
+                }
+            }
+        }
+
+        stage("Docker: Push to DockerHub"){
+            steps{
+                script{
+                    docker_push("wanderlust-backend-beta","${params.BACKEND_DOCKER_TAG}","YOUR_DOCKERHUB_USERNAME")
+                    docker_push("wanderlust-frontend-beta","${params.FRONTEND_DOCKER_TAG}","YOUR_DOCKERHUB_USERNAME")
+                }
+            }
+        }
+    }
+    post{
+        success{
+            archiveArtifacts artifacts: '*.xml', allowEmptyArchive: true, followSymlinks: false
+            build job: "Wanderlust-CD", parameters: [
+                string(name: 'FRONTEND_DOCKER_TAG', value: "${params.FRONTEND_DOCKER_TAG}"),
+                string(name: 'BACKEND_DOCKER_TAG', value: "${params.BACKEND_DOCKER_TAG}")
+            ]
+        }
+    }
+}
+```
+
+What changed from the original project file: `agent any` instead of the node label `Node`, the AWS "Exporting environment variables" stage is removed (the URLs are already set in the env files in Step 3), `allowEmptyArchive: true` was added, and the names are your own.
+
+## Appendix B: CD Jenkinsfile (`GitOps/Jenkinsfile`)
+
+Replace `YOUR_GITHUB_USERNAME`, `YOUR_GITHUB_EMAIL` and `YOUR_EMAIL`:
+
+```groovy
+@Library('Shared') _
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'FRONTEND_DOCKER_TAG', defaultValue: '', description: 'Frontend Docker tag of the image built by the CI job')
+        string(name: 'BACKEND_DOCKER_TAG', defaultValue: '', description: 'Backend Docker tag of the image built by the CI job')
+    }
+
+    stages {
+        stage("Workspace cleanup"){
+            steps{
+                script{
+                    cleanWs()
+                }
+            }
+        }
+
+        stage('Git: Code Checkout') {
+            steps {
+                script{
+                    code_checkout("https://github.com/YOUR_GITHUB_USERNAME/Wanderlust-Mega-Project.git","main")
+                }
+            }
+        }
+
+        stage('Verify: Docker Image Tags') {
+            steps {
+                script{
+                    echo "FRONTEND_DOCKER_TAG: ${params.FRONTEND_DOCKER_TAG}"
+                    echo "BACKEND_DOCKER_TAG: ${params.BACKEND_DOCKER_TAG}"
+                }
+            }
+        }
+
+        stage("Update: Kubernetes manifests"){
+            steps{
+                script{
+                    dir('kubernetes'){
+                        sh """
+                            sed -i -e s/wanderlust-backend-beta.*/wanderlust-backend-beta:${params.BACKEND_DOCKER_TAG}/g backend.yaml
+                        """
+                    }
+
+                    dir('kubernetes'){
+                        sh """
+                            sed -i -e s/wanderlust-frontend-beta.*/wanderlust-frontend-beta:${params.FRONTEND_DOCKER_TAG}/g frontend.yaml
+                        """
+                    }
+                }
+            }
+        }
+
+        stage("Git: Code update and push to GitHub"){
+            steps{
+                script{
+                    withCredentials([gitUsernamePassword(credentialsId: 'Github-cred', gitToolName: 'Default')]) {
+                        sh '''
+                        git config user.email "YOUR_GITHUB_EMAIL"
+                        git config user.name "YOUR_GITHUB_USERNAME"
+
+                        echo "Checking repository status: "
+                        git status
+
+                        echo "Adding changes to git: "
+                        git add .
+
+                        echo "Commiting changes: "
+                        git commit -m "Updated image tags" || echo "Nothing to commit"
+
+                        echo "Pushing changes to github: "
+                        git push https://github.com/YOUR_GITHUB_USERNAME/Wanderlust-Mega-Project.git main
+                    '''
+                    }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                emailext attachLog: true,
+                from: 'YOUR_EMAIL',
+                subject: "Wanderlust Application has been updated and deployed - '${currentBuild.result}'",
+                body: """
+                    <html>
+                    <body>
+                        <div style="background-color: #FFA07A; padding: 10px; margin-bottom: 10px;">
+                            <p style="color: black; font-weight: bold;">Project: ${env.JOB_NAME}</p>
+                        </div>
+                        <div style="background-color: #90EE90; padding: 10px; margin-bottom: 10px;">
+                            <p style="color: black; font-weight: bold;">Build Number: ${env.BUILD_NUMBER}</p>
+                        </div>
+                        <div style="background-color: #87CEEB; padding: 10px; margin-bottom: 10px;">
+                            <p style="color: black; font-weight: bold;">URL: ${env.BUILD_URL}</p>
+                        </div>
+                    </body>
+                    </html>
+            """,
+            to: 'YOUR_EMAIL',
+            mimeType: 'text/html'
+            }
+        }
+    }
+}
+```
+
+How it works: the two `sed` lines replace everything after the image name with the new tag, so the registry and username part of the `image:` line in the manifests (set in Step 3.3) stays as it is. `|| echo "Nothing to commit"` keeps the build green when you run it again with the same tag.
+
+## Appendix C: Shared library file `vars/owasp_dependency.groovy`
+
+In your `Jenkins_SharedLib` fork:
+
+```groovy
+def call(){
+  dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'OWASP', nvdCredentialsId: 'nvd-api-key'
+  dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+}
+```
+
+- `odcInstallation: 'OWASP'` is the tool name from Step 9.4.
+- `nvdCredentialsId: 'nvd-api-key'` is the Secret text credential from Step 9.3. Without it the stage fails with `Invalid API Key, length of 0`.
+- The `--disable...Audit` flags skip the extra Yarn and npm audit lookups.
+
+The other library steps (`code_checkout`, `trivy_scan`, `sonarqube_analysis`, `sonarqube_code_quality`, `docker_build`, `docker_push`) are used unchanged.
+
+## Appendix D: Port-forward script (`~/pf.sh`)
+
+Create the file:
+
 ```bash
-eksctl delete cluster --name=wanderlust --region=us-west-1
+cat > ~/pf.sh <<'SCRIPT'
+#!/bin/bash
+fwd() { while true; do kubectl port-forward --address 0.0.0.0 -n "$1" "$2" "$3"; sleep 2; done; }
+fwd wanderlust svc/frontend-service 31000:5173 &
+fwd wanderlust svc/backend-service  31100:8080 &
+fwd argocd     svc/argocd-server    8443:443   &
+wait
+SCRIPT
+chmod +x ~/pf.sh
 ```
 
-#
+Start it in the background: `nohup ~/pf.sh > /tmp/pf.log 2>&1 &`
+
+Each line keeps retrying, so when Argo CD replaces a pod the forward reconnects by itself within a few seconds.
+
+Note: `pkill -f "kubectl port-forward"` stops **all** port-forwards, including Argo CD's and Grafana's. Always restart `~/pf.sh` afterwards.
+
+---
+
+## License
+
+See the `LICENSE` file in this repository. The original project is by Madhup Pandey (DevMadhup).
